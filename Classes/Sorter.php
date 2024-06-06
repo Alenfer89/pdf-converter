@@ -44,15 +44,19 @@ class Sorter
     public function getCount(string $folder_to_scan): int
     {
         $fi = new FilesystemIterator($folder_to_scan, FilesystemIterator::SKIP_DOTS);
+
         /**
          * se c'è gitignore
          */
-        $fi = array_filter((array) $fi, function ($file) {
-            return !in_array($file, ['.', '..', '.gitignore']);
-        });
-        $fileCount = count($fi);
-        // $fileCount = iterator_count($fi); //per cartelle remote
-        return $fileCount;
+        $counter = [];
+
+        foreach ($fi as $fileinfo) {
+            if (!in_array($fileinfo->getExtension(), ['.', '..', '.gitignore'])) {
+                $counter[] = $fileinfo;
+            }
+        }
+
+        return count($counter);
     }
 
     /**
@@ -117,17 +121,15 @@ class Sorter
         return $zipOut->close();
     }
 
-    protected function addZipFile($path, $zip)
+    protected function addZipFile($workDir, $zip, $path = null)
     {
-        $rootPath = realpath('manage') . '/';
-
-        $fi = new FilesystemIterator($path, FilesystemIterator::SKIP_DOTS);
+        $fi = new FilesystemIterator($path ?? $workDir, FilesystemIterator::SKIP_DOTS);
 
         foreach ($fi as $fileinfo) {
 
             if ($fileinfo->isDir()) {
 
-                $this->addZipFile($fileinfo->getPathname(), $zip);
+                $this->addZipFile($workDir, $zip, $fileinfo->getPathname());
             } else {
 
                 if ($fileinfo->getExtension() == 'gitignore') {
@@ -136,10 +138,47 @@ class Sorter
 
                 $filePath = $fileinfo->getPathname();
 
-                $relativePath = substr($filePath, strlen($rootPath));
+                $relativePath = substr($filePath, strlen($workDir));
 
                 $zip->addFile($filePath, $relativePath);
             }
+        }
+    }
+
+    /**
+     * Questa funzione gestisce l'errore nelle varie fasi della creazione del pdf. Il comportamento generale è di spostare lo zip nella cartella
+     * degli errori, cancellare il file con la password, ripulire la cartella locale di lavoro, loggare il tutto.
+     *
+     * @param [type] $old_zip_path zip da spostare
+     * @param [type] $error_zip_path nuovo percorso zip
+     * @param [type] $pswd_path file di password associata che va rimossa dalla cartella di scansione
+     * @param [type] $work_path cartella di lavoro temporanea da spostare
+     * @param PDFLogger $logger
+     * @return void
+     */
+    function manageError($old_zip_path, $error_zip_path, $pswd_path, $work_path, PDFLogger $logger)
+    {
+        rename($old_zip_path, $error_zip_path);
+        $logger->logAll("File spostato DA: {$old_zip_path} --- A: {$error_zip_path}");
+        $this->cleanUp($pswd_path, $logger);
+        $this->subFolderCleaning($work_path);
+        $logger->logAll("Pulita cartella di lavoro {$work_path}");
+        return;
+    }
+
+    /**
+     * Dato un file, lo cancella e lo logga sia in locale che in remoto
+     *
+     * @param [type] $ini_zip_path da cancellare
+     * @param PDFLogger $logger
+     * @return void
+     */
+    public function cleanUp($ini_zip_path, PDFLogger $logger)
+    {
+        if (unlink($ini_zip_path)) {
+            $logger->logAll("Pulizia: cancellato file {$ini_zip_path}");
+        } else {
+            $logger->logAll("ERRORE nella pulizia per file: {$ini_zip_path}");
         }
     }
 }
