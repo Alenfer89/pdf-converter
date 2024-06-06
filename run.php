@@ -1,129 +1,113 @@
 <?php
 require 'vendor/autoload.php';
-// require 'my_autoloader.php';
-
-require_once 'Classes/Sorter.php';
-require_once 'Classes/PdfGenerator.php';
-require_once 'Classes/PdfMerger.php';
 
 use Classes\Sorter;
-use Classes\PdfGenerator;
+use Classes\PDFLogger;
 use Classes\PdfMerger;
+use Classes\PdfGenerator;
 
 $config = include('config/config.php');
-// var_dump(dirname(__DIR__ . '/manage'));
-// var_dump(realpath(__DIR__ . '/manage'));
-// var_dump(realpath('/manage'));
-// var_dump(realpath('manage'));
-// var_dump($config);
-// return;
-
+// $config = include('config/local_config.php');
 
 $sorter = (new Sorter());
+$logger = new PDFLogger($config['local_log_path'], $config['remote_log_path']);
+
+$logger->clearLogFolders();
 
 $fileCount = $sorter->getCount($config['scan_path']);
 
 //SE NON CI SONO FILE: EARLY RETURN
 if (!$fileCount) {
-    PDFlog('Nessun file in coda');
+    $logger->logAll('Nessun file in coda');
     return;
 }
 
-$file_path = $sorter->getOldest($config['scan_path'] . '*.zip');
+$logger->logAll("File trovati in cartella {$congig['scan_path']}: {$fileCount}");
+
+$ini_zip_path = $sorter->getOldest($config['scan_path'] . '*.zip');
 
 //SE NON C'è UN FILE PATH ESCO E BISOGNA CONTROLLARE CARTERLLA
-if (!$file_path) {
-    PDFLog("ERRORE: ci sono file in coda ma non sono .zip. Check cartella {$config['scan_path']}");
+if (!$ini_zip_path) {
+    $logger->logAll("ERRORE: ci sono file in coda ma non sono .zip. Check cartella {$config['scan_path']}");
     return;
 }
 
 //SE LO SCRIPT STA GIà LAVORANDO ESCO
-if (!$sorter->checkJobIsRunning($config['tmp_path'])) {
-    PDFlog('Run attualmente in corso, esco e riprovo al prossimo cron');
+if (!$sorter->checkJobIsRunning($config['work_path'])) {
+    $logger->logAll('Run attualmente in corso, esco e riprovo al prossimo cron');
     return;
 }
 
-$zip_original_name = basename($file_path);
-$pswd_file = $config['scan_path'] . basename($file_path, '.zip') . '.txt';
+$zip_original_name = basename($ini_zip_path);
+$pswd_file = $config['scan_path'] . basename($ini_zip_path, '.zip') . '.txt';
 
 //estrazione password
 if (!$password = file_get_contents($pswd_file)) {
-    PDFlog("ERRORE estrazione password per file: {$zip_original_name}");
-    manageCreationError($file_path, $config['error_path'] . $zip_original_name);
+    $logger->logAll("ERRORE estrazione password per file: {$zip_original_name}");
+    $sorter->manageError($ini_zip_path, $config['error_path'] . $zip_original_name, $pswd_file, $config['work_path'], $logger);
     return;
 }
 
-PDFlog("INIZIO conversione per file: {$zip_original_name}");
+$logger->logAll("INIZIO conversione per file: {$zip_original_name}");
 
 //estrazione zip
 $za = new ZipArchive();
-$za->open($file_path);
+$za->open($ini_zip_path);
 $za->setPassword($password);
-$za->extractTo($config['tmp_path']);
+$za->extractTo($config['work_path']);
 $za->close();
 
-memoryInfo('CONSUMO MEMORIA PRIMA DELLA GENERAZIONE');
+$logger->memoryInfo('CONSUMO MEMORIA PRIMA DELLA GENERAZIONE');
 
 //creazione pdf
-(new PdfGenerator)->handle($config['tmp_path']);
+(new PdfGenerator)->handle($config['work_path']);
 
-memoryInfo('CONSUMO MEMORIA DOPO GENERAZIONE E PRIMA DEL MERGE');
+$logger->memoryInfo('CONSUMO MEMORIA DOPO GENERAZIONE E PRIMA DEL MERGE');
 
 //merge dei pdf
-$merge_check = (new PdfMerger)->handle($config['tmp_path']);
+$merge_check = (new PdfMerger)->handle($config['work_path']);
 
-memoryInfo('CONSUMO MEMORIA DOPO MERGE');
+$logger->memoryInfo('CONSUMO MEMORIA DOPO MERGE');
 
 //SE MERGE NON VA A BUON FINE, GESTISCO ERRORE
 if (!$merge_check) {
-    PDFlog("Errore nel merge dei pdf per file: {$zip_original_name}");
-    manageCreationError($file_path, $config['error_path'] . $zip_original_name);
-}
-
-//creazione zip di output
-$zip_check = $sorter->manageZipCreation($config['output_path'], $zip_original_name, $config['tmp_path']);
-
-//SE NUOVO ZIP NON VA A BUON FINE, GFESTISCO ERRORE
-if (!$zip_check) {
-    PDFlog("Errore nella creazione dello zip per file: {$zip_original_name}");
-    manageCreationError($file_path, $config['error_path'] . $zip_original_name);
-}
-
-//!pulizia cartella tmp di lavoro
-$sorter->subFolderCleaning($config['tmp_path']);
-
-// unlink($file_path)
-if (unlink($file_path)) {
-    PDFlog("Pulizia: cancellato file {$file_path}");
-} else {
-    PDFlog("ERRORE nella pulizia per file: {$file_path}");
-}
-
-PDFlog("Creazione PDF completata per file: {$zip_original_name}");
-
-//FINE
-return;
-
-
-
-function manageCreationError($file_path, $error_path)
-{
-    $old = $file_path;
-    // $new = str_replace('/scan', '/error', $file_path);
-    $new = $error_path;
-    rename($old, $new);
+    $logger->logAll("Errore nel merge dei pdf per file: {$zip_original_name}");
+    $sorter->manageError($ini_zip_path, $config['error_path'] . $zip_original_name, $pswd_file, $config['work_path'], $logger);
     return;
 }
 
-function PDFlog($msg)
-{
-    $log = "[" . date("Y-m-d H:i:s") . "] -> " . $msg . PHP_EOL;
-    file_put_contents('log/log-' . date("Y-m-d") . '.log', $log, FILE_APPEND);
+$tmp_zip_path = $config['tmp_path'] . $zip_original_name;
+$err_zip_path = $config['error_path'] . $zip_original_name;
+$out_zip_path = $config['output_path'] . $zip_original_name;
+$suc_zip_path = $config['successful_path'] . $zip_original_name;
+
+//creazione zip di output
+$zip_check = $sorter->manageZipCreation($tmp_zip_path, $config['work_path']);
+
+//SE NUOVO ZIP NON VA A BUON FINE, GFESTISCO ERRORE
+if (!$zip_check) {
+    $logger->logAll("Errore nella creazione dello zip per file: {$zip_original_name}. File da spostare in {$config['error_path']}");
+    $sorter->manageError($ini_zip_path, $err_zip_path, $pswd_file, $config['work_path'], $logger);
+    return;
 }
 
-function memoryInfo($msg)
-{
-    PDFlog($msg);
-    PDFlog('The script is now using: ' . round(memory_get_usage() / 1024) . ' KB of memory.');
-    PDFlog('Peak usage: ' . round(memory_get_peak_usage() / 1024) . ' KB of memory.');
+if (!copy($tmp_zip_path, $out_zip_path)) {
+    $logger->logAll("Errore nella copia dello zip {$zip_original_name} da {$config['tmp_path']} a {$config['output_path']}. File da spostare in {$config['error_path']}");
+    $sorter->manageError($ini_zip_path, $err_zip_path, $pswd_file, $config['work_path'], $logger);
+    return;
+} else {
+    $logger->logAll("Copia dello zip {$zip_original_name} da {$config['tmp_path']} a {$config['output_path']}");
 }
+
+//!pulizia cartella tmp di lavoro
+$sorter->subFolderCleaning($config['work_path']);
+$sorter->cleanUp($tmp_zip_path, $logger);
+
+copy($ini_zip_path, $suc_zip_path);
+$sorter->cleanUp($ini_zip_path, $logger);
+$sorter->cleanUp($pswd_file, $logger);
+
+$logger->logAll("Creazione PDF completata per file: {$zip_original_name}");
+
+//FINE
+return;
